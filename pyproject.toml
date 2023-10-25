@@ -17,7 +17,6 @@ target-version = ["py311"]
 
 [tool.ruff]
 # Credit to @mikeshardmind for most of this setup.
-include = ["searcher"]
 line-length = 120
 target-version = "py311"
 select = [

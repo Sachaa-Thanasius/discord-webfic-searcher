@@ -1,3 +1,9 @@
+"""
+TODO: Double-check necessary permissions.
+TODO: Double-check necessary intents.
+TODO: Evaluate method of input for auth details.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -708,7 +714,7 @@ class VersionableTree(discord.app_commands.CommandTree):
 class WebficSearcherBot(discord.AutoShardedClient):
     def __init__(self, *, session: aiohttp.ClientSession, atlas_auth: aiohttp.BasicAuth) -> None:
         super().__init__(
-            intents=discord.Intents.all(),
+            intents=discord.Intents(guilds=True, messages=True, message_content=True),
             activity=discord.Game(name="https://github.com/Sachaa-Thanasius/discord-webfic-searcher"),
         )
         self.tree = VersionableTree(self)
@@ -730,7 +736,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
 
         await self.wait_until_ready()
         data = await self.application_info()
-        perms = discord.Permissions(274881367040)  # TODO: Evaluate necessary permissions.
+        perms = discord.Permissions(19456)  # TODO: Evaluate necessary permissions.
         self.invite_link = discord.utils.oauth_url(data.id, permissions=perms)
 
     async def setup_hook(self) -> None:
