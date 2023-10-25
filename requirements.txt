@@ -1,0 +1,9 @@
+aiohttp>=3.8,<4
+ao3.py @ git+https://github.com/Sachaa-Thanasius/ao3.py.git
+apsw
+atlas-api @ git+https://github.com/Sachaa-Thanasius/atlas-api-wrapper.git
+discord.py>=2.3,<3
+fichub-api @ git+https://github.com/Sachaa-Thanasius/fichub-api-wrapper.git
+platformdirs
+uvloop>=0.17.0;sys_platform=="linux"
+xxhash
