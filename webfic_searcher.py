@@ -14,7 +14,7 @@ import os
 import re
 import textwrap
 import tomllib
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Self, TypeAlias
 
@@ -85,13 +85,13 @@ def _setup_db(conn: apsw.Connection) -> None:
         cursor.execute(INITIALIZATION_STATEMENT)
 
 
-def _query(conn: apsw.Connection, query_str: str, guild_id: int) -> list[AutoresponseLocation]:
+def _query(conn: apsw.Connection, query_str: str, params: apsw.Bindings | None = None) -> list[AutoresponseLocation]:
     with conn:
         cursor = conn.cursor()
-        return [AutoresponseLocation(*row) for row in cursor.execute(query_str, (guild_id,))]
+        return [AutoresponseLocation(*row) for row in cursor.execute(query_str, params)]
 
 
-def _add(conn: apsw.Connection, locations: list[AutoresponseLocation]) -> list[AutoresponseLocation]:
+def _add(conn: apsw.Connection, locations: Sequence[AutoresponseLocation]) -> list[AutoresponseLocation]:
     with conn:
         cursor = conn.cursor()
         cursor.executemany(INSERT_CHANNEL_STATEMENT, locations)
@@ -100,7 +100,7 @@ def _add(conn: apsw.Connection, locations: list[AutoresponseLocation]) -> list[A
         ]
 
 
-def _drop(conn: apsw.Connection, locations: list[AutoresponseLocation]) -> list[AutoresponseLocation]:
+def _drop(conn: apsw.Connection, locations: Sequence[AutoresponseLocation]) -> list[AutoresponseLocation]:
     with conn:
         cursor = conn.cursor()
         cursor.executemany(REMOVE_GUILD_CHANNEL_STATEMENT, locations)
@@ -487,6 +487,59 @@ class AO3SeriesView(discord.ui.View):
         await self.update_page(interaction)
 
 
+class ChannelNotFound(discord.app_commands.TransformerError):
+    """Exception raised when a string fails to be converted to a Discord channel."""
+
+
+class GuildChannelListTransformer(discord.app_commands.Transformer):
+    """A transformer that attempts to transform a string input into a list of channels.
+
+    Notes
+    -----
+    This assumes the command is being invoked in a guild and also does not search all channels available to the bot for
+    a match.
+
+    Much of the implementation is copied from discord.py's GuildChannelConverter.
+    """
+
+    async def transform(self, itx: discord.Interaction, value: str) -> list[discord.abc.GuildChannel]:
+        value_split = re.split(" ", value)
+        results: list[discord.abc.GuildChannel] = []
+
+        for potential_channel in value_split:
+            try:
+                results.append(self._resolve_channel(itx, potential_channel))
+            except ChannelNotFound:
+                pass
+        return results
+
+    def _resolve_channel(self, itx: discord.Interaction, argument: str) -> discord.abc.GuildChannel:
+        match = re.match(r"([0-9]{15,20})$", argument) or re.match(r"<#([0-9]{15,20})>$", argument)
+        result = None
+        guild = itx.guild
+        assert itx.guild
+
+        if guild:
+            if match is None:
+                # not a mention
+                result = discord.utils.get(guild.channels, name=argument)
+            else:
+                channel_id = int(match.group(1))
+                # guild.get_channel returns an explicit union instead of the base class
+                result = guild.get_channel(channel_id)
+
+        if not isinstance(result, discord.abc.GuildChannel):
+            raise ChannelNotFound(argument, discord.AppCommandOptionType.string, self)
+
+        return result
+
+
+GuildChannelList: TypeAlias = discord.app_commands.Transform[
+    list[discord.abc.GuildChannel],
+    GuildChannelListTransformer,
+]
+
+
 wf_autoresponse = discord.app_commands.Group(
     name="wf_autoresponse",
     description="Autoresponse-related commands for automatically responding to fanfiction links in certain channels.",
@@ -496,13 +549,13 @@ wf_autoresponse = discord.app_commands.Group(
 
 
 @wf_autoresponse.command(name="get")
-async def wf_auto_get(itx: discord.Interaction[WebficSearcherBot]) -> None:
+async def wf_autoresponse_get(itx: discord.Interaction[WebficSearcherBot]) -> None:
     """Display the channels in the server set to autorespond to webfiction links."""
 
     assert itx.guild_id  # Known at runtime.
 
     await itx.response.defer()
-    active_channels = _query(itx.client.db_connection, SELECT_BY_GUILD_STATEMENT, itx.guild_id)
+    active_channels = await itx.client.get_guild_autoresponse_channels(itx.guild_id)
     embed = discord.Embed(
         title="Autoresponse Channels for Fanfic Links",
         description="\n".join(f"<#{result.channel_id}>" for result in active_channels),
@@ -511,10 +564,7 @@ async def wf_auto_get(itx: discord.Interaction[WebficSearcherBot]) -> None:
 
 
 @wf_autoresponse.command(name="add")
-async def wf_autoresponse_add(
-    itx: discord.Interaction[WebficSearcherBot],
-    channels: list[discord.abc.GuildChannel],
-) -> None:
+async def wf_autoresponse_add(itx: discord.Interaction[WebficSearcherBot], channels: GuildChannelList) -> None:
     """Set the bot to listen for AO3/FFN/other site links posted in the given channels.
 
     If allowed, the bot will respond automatically with an informational embed.
@@ -533,7 +583,7 @@ async def wf_autoresponse_add(
 
     # Update the database.
     channels_to_add = [AutoresponseLocation(itx.guild_id, channel.id) for channel in channels]
-    active_channels = _add(itx.client.db_connection, channels_to_add)
+    active_channels = await itx.client.add_autoresponse_channels(channels_to_add)
 
     embed = discord.Embed(
         title="Adjusted Autoresponse Channels for Fanfic Links",
@@ -543,10 +593,7 @@ async def wf_autoresponse_add(
 
 
 @wf_autoresponse.command(name="remove")
-async def wf_autoresponse_remove(
-    itx: discord.Interaction[WebficSearcherBot],
-    channels: list[discord.abc.GuildChannel],
-) -> None:
+async def wf_autoresponse_remove(itx: discord.Interaction[WebficSearcherBot], channels: GuildChannelList) -> None:
     """Set the bot to not listen for AO3/FFN/other site links posted in the given channels.
 
     The bot will no longer automatically respond to links with information embeds.
@@ -565,7 +612,7 @@ async def wf_autoresponse_remove(
 
     # Update the database.
     channels_to_remove = [AutoresponseLocation(itx.guild_id, channel.id) for channel in channels]
-    active_channels = _drop(itx.client.db_connection, channels_to_remove)
+    active_channels = await itx.client.drop_autoresponse_channels(channels_to_remove)
 
     embed = discord.Embed(
         title="Adjusted Autoresponse Channels for Webfiction Links",
@@ -761,7 +808,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
 
         # Listen to the allowed channels in the allowed guilds for valid fanfic links.
         if (
-            (channels_cache := _query(self.db_connection, SELECT_ALL_STATEMENT, message.guild.id))
+            (channels_cache := await self.get_guild_autoresponse_channels(message.guild.id))
             and ((message.guild.id, message.channel.id) in channels_cache)
             and re.search(STORY_WEBSITE_REGEX, message.content)
         ):
@@ -773,6 +820,18 @@ class WebficSearcherBot(discord.AutoShardedClient):
                         embed = ff_embed_factory(story_data)
                         if not isinstance(embed, NotFoundEmbed):
                             await message.channel.send(embed=embed)
+
+    async def get_all_autoresponse_channels(self) -> list[AutoresponseLocation]:
+        return _query(self.db_connection, SELECT_ALL_STATEMENT)
+
+    async def get_guild_autoresponse_channels(self, guild_id: int) -> list[AutoresponseLocation]:
+        return _query(self.db_connection, SELECT_BY_GUILD_STATEMENT, (guild_id,))
+
+    async def add_autoresponse_channels(self, locations: Sequence[AutoresponseLocation]) -> list[AutoresponseLocation]:
+        return _add(self.db_connection, locations)
+
+    async def drop_autoresponse_channels(self, locations: Sequence[AutoresponseLocation]) -> list[AutoresponseLocation]:
+        return _drop(self.db_connection, locations)
 
     async def search_ao3(self, name_or_url: str) -> ao3.Work | ao3.Series | fichub_api.Story | None:
         """More generically search AO3 for works based on a partial title or full url."""
@@ -852,7 +911,7 @@ def load_config() -> dict[str, Any]:
         return tomllib.load(fp)
 
 
-async def main() -> None:
+def main() -> None:
     config = load_config()
     token = config["discord"]["token"]
     atlas_auth = aiohttp.BasicAuth(config["atlas"]["login"], config["atlas"]["password"])
@@ -871,4 +930,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     os.umask(0o077)
-    asyncio.run(main())
+    raise SystemExit(main())
