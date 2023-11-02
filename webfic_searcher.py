@@ -1,13 +1,14 @@
 """
+TODO: Fix upstream dependencies like ao3.py and fichub-api-wrapper.
 TODO: Double-check necessary permissions.
 TODO: Double-check necessary intents.
 TODO: Evaluate method of input for auth details.
+TODO: Try to set up caching for the embed creation.
 """
 
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import logging
 import os
@@ -173,18 +174,6 @@ STORY_WEBSITE_REGEX = re.compile(
 )
 
 
-class NotFoundEmbed(discord.Embed):
-    """An embed that represents a story that could not be found."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(
-            title="No Results",
-            description="No results found. You may need to edit your search.",
-            timestamp=discord.utils.utcnow(),
-        )
-
-
-@functools.cache
 def create_ao3_work_embed(work: ao3.Work) -> discord.Embed:
     """Create an embed that holds all the relevant metadata for an Archive of Our Own work.
 
@@ -227,7 +216,6 @@ def create_ao3_work_embed(work: ao3.Work) -> discord.Embed:
     return ao3_embed
 
 
-@functools.cache
 def create_ao3_series_embed(series: ao3.Series) -> discord.Embed:
     """Create an embed that holds all the relevant metadata for an Archive of Our Own series.
 
@@ -259,7 +247,6 @@ def create_ao3_series_embed(series: ao3.Series) -> discord.Embed:
     return ao3_embed
 
 
-@functools.cache
 def create_atlas_ffn_embed(story: atlas_api.Story) -> discord.Embed:
     """Create an embed that holds all the relevant metadata for a FanFiction.Net story.
 
@@ -291,7 +278,6 @@ def create_atlas_ffn_embed(story: atlas_api.Story) -> discord.Embed:
     return ffn_embed
 
 
-@functools.cache
 def create_fichub_embed(story: fichub_api.Story) -> discord.Embed:
     """Create an embed that holds all the relevant metadata for a few different types of online fiction story.
 
@@ -351,9 +337,10 @@ EMBED_STRATEGIES: dict[Any, Callable[..., discord.Embed]] = {
 }
 
 
-def ff_embed_factory(story_data: Any | None) -> discord.Embed:
-    strategy = EMBED_STRATEGIES.get(type(story_data), NotFoundEmbed)
-    return strategy(story_data)
+def ff_embed_factory(story_data: Any | None) -> discord.Embed | None:
+    if story_data is not None and (strategy := EMBED_STRATEGIES.get(type(story_data))):
+        return strategy(story_data)
+    return None
 
 
 class AO3SeriesView(discord.ui.View):
@@ -496,7 +483,7 @@ class GuildChannelListTransformer(discord.app_commands.Transformer):
 
     Notes
     -----
-    This assumes the command is being invoked in a guild and also does not search all channels available to the bot for
+    This assumes the command is being invoked in a guild and thus does not search all channels available to the bot for
     a match.
 
     Much of the implementation is copied from discord.py's GuildChannelConverter.
@@ -517,7 +504,7 @@ class GuildChannelListTransformer(discord.app_commands.Transformer):
         match = re.match(r"([0-9]{15,20})$", argument) or re.match(r"<#([0-9]{15,20})>$", argument)
         result = None
         guild = itx.guild
-        assert itx.guild
+        assert guild
 
         if guild:
             if match is None:
@@ -672,6 +659,12 @@ async def wf_search(
         story_data = await itx.client.search_other(name_or_url)
 
     embed = ff_embed_factory(story_data)
+    if embed is None:
+        embed = discord.Embed(
+            title="No Results",
+            description="No results found. You may need to edit your search.",
+            timestamp=discord.utils.utcnow(),
+        )
 
     if isinstance(story_data, ao3.Series):
         view = AO3SeriesView(itx.user.id, story_data)
@@ -818,7 +811,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
                 async for story_data in self.get_ff_data_from_links(message.content):
                     if story_data is not None:
                         embed = ff_embed_factory(story_data)
-                        if not isinstance(embed, NotFoundEmbed):
+                        if embed:
                             await message.channel.send(embed=embed)
 
     async def get_all_autoresponse_channels(self) -> list[AutoresponseLocation]:
@@ -907,7 +900,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
 
 def load_config() -> dict[str, Any]:
     config_path = Path("config.toml")
-    with config_path.open(mode="rb", encoding="utf-8") as fp:
+    with config_path.open(mode="rb") as fp:
         return tomllib.load(fp)
 
 
