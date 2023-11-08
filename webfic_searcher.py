@@ -67,7 +67,7 @@ ON CONFLICT (guild_id, channel_id) DO NOTHING;
 """
 
 REMOVE_GUILD_CHANNEL_STATEMENT = """
-DELETE FROM webfic_autoresponse_settings WHERE channel_id = ?;
+DELETE FROM webfic_autoresponse_settings WHERE guild_id = ? AND channel_id = ?;
 """
 
 CLEAR_GUILD_CHANNELS_STATEMENT = """
