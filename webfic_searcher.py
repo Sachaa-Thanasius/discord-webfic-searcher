@@ -1,5 +1,5 @@
 """
-TODO: Fix upstream dependencies like ao3.py and fichub-api-wrapper.
+TODO: Fix upstream dependencies like ao3.py.
 TODO: Double-check necessary permissions.
 TODO: Double-check necessary intents.
 TODO: Evaluate method of input for auth details.
@@ -67,11 +67,11 @@ ON CONFLICT (guild_id, channel_id) DO NOTHING;
 """
 
 REMOVE_GUILD_CHANNEL_STATEMENT = """
-DELETE FROM fanfic_autoresponse_settings WHERE channel_id = ?;
+DELETE FROM webfic_autoresponse_settings WHERE channel_id = ?;
 """
 
 CLEAR_GUILD_CHANNELS_STATEMENT = """
-DELETE FROM fanfic_autoresponse_settings WHERE guild_id = ?;
+DELETE FROM webfic_autoresponse_settings WHERE guild_id = ?;
 """
 
 
@@ -164,7 +164,7 @@ STORY_WEBSITE_STORE = {
         "Sink Into Your Eyes",
         "SIYE",
         re.compile(r"(?:www\.|)siye\.co\.uk/(?:siye/|)viewstory\.php\?sid=\d+"),
-        "https://www.siye.co.uk/siye/favicon.ico",
+        "https://www.siye.co.uk/skins/HarryGinny/top.jpg",
     ),
 }
 
@@ -287,7 +287,7 @@ def create_fichub_embed(story: fichub_api.Story) -> discord.Embed:
     # Format the relevant information.
     updated = story.updated.strftime("%B %d, %Y")
     fandoms = textwrap.shorten(", ".join(story.fandoms), 100, placeholder="...")
-    categories_list = story.more_meta.get("category", [])
+    categories_list = story.tags.category if isinstance(story, fichub_api.AO3Story) else ()
     categories = textwrap.shorten(", ".join(categories_list), 100, placeholder="...")
     characters = textwrap.shorten(", ".join(story.characters), 100, placeholder="...")
     details = " • ".join((fandoms, categories, characters))
@@ -298,18 +298,12 @@ def create_fichub_embed(story: fichub_api.Story) -> discord.Embed:
         None,
     )
 
-    if "fanfiction.net" in story.url:
+    if isinstance(story, fichub_api.FFNStory):
         stats_names = ("reviews", "favorites", "follows")
-        stats_str = " • ".join(f"**{name.capitalize()}:** {story.stats[name]:,d}" for name in stats_names)
-    elif "archiveofourown.org" in story.url:
+        stats_str = " • ".join(f"**{name.capitalize()}:** {getattr(story.stats, name):,d}" for name in stats_names)
+    elif isinstance(story, fichub_api.AO3Story):
         stats_names = ("comments", "kudos", "bookmarks", "hits")
-        # Account for absent extended metadata.
-        stats = (
-            f"**{stat_name.capitalize()}:** {ind_stat:,d}"
-            for stat_name in stats_names
-            if (ind_stat := story.stats.get(stat_name)) is not None
-        )
-        stats_str = " • ".join(stats)
+        stats_str = " • ".join(f"**{name.capitalize()}:** {getattr(story.stats, name):,d}" for name in stats_names)
     else:
         stats_str = "No stats available at this time."
 
@@ -331,7 +325,9 @@ def create_fichub_embed(story: fichub_api.Story) -> discord.Embed:
 
 EMBED_STRATEGIES: dict[Any, Callable[..., discord.Embed]] = {
     atlas_api.Story: create_atlas_ffn_embed,
-    fichub_api.Story: create_fichub_embed,
+    fichub_api.AO3Story: create_fichub_embed,
+    fichub_api.FFNStory: create_fichub_embed,
+    fichub_api.OtherStory: create_fichub_embed,
     ao3.Work: create_ao3_work_embed,
     ao3.Series: create_ao3_series_embed,
 }
@@ -529,7 +525,7 @@ GuildChannelList: TypeAlias = discord.app_commands.Transform[
 
 wf_autoresponse = discord.app_commands.Group(
     name="wf_autoresponse",
-    description="Autoresponse-related commands for automatically responding to fanfiction links in certain channels.",
+    description="Autoresponse-related commands for automatically responding to webfiction links in certain channels.",
     default_permissions=discord.Permissions(administrator=True),
     guild_only=True,
 )
@@ -544,7 +540,7 @@ async def wf_autoresponse_get(itx: discord.Interaction[WebficSearcherBot]) -> No
     await itx.response.defer()
     active_channels = await itx.client.get_guild_autoresponse_channels(itx.guild_id)
     embed = discord.Embed(
-        title="Autoresponse Channels for Fanfic Links",
+        title="Autoresponse Channels for Webfic Links",
         description="\n".join(f"<#{result.channel_id}>" for result in active_channels),
     )
     await itx.followup.send(embed=embed)
@@ -573,7 +569,7 @@ async def wf_autoresponse_add(itx: discord.Interaction[WebficSearcherBot], chann
     active_channels = await itx.client.add_autoresponse_channels(channels_to_add)
 
     embed = discord.Embed(
-        title="Adjusted Autoresponse Channels for Fanfic Links",
+        title="Adjusted Autoresponse Channels for Webfic Links",
         description="\n".join(f"<#{row.channel_id}>" for row in active_channels),
     )
     await itx.followup.send(embed=embed, ephemeral=True)
@@ -791,7 +787,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
         await self.tree.sync_if_commands_updated()
 
     async def on_message(self, message: discord.Message) -> None:
-        """Send informational embeds about a story if the user sends a fanfiction link.
+        """Send informational embeds about a story if the user sends a webfiction link.
 
         Must be triggered in an allowed channel.
         """
@@ -799,7 +795,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
         if (message.author == self.user) or (not message.guild):
             return
 
-        # Listen to the allowed channels in the allowed guilds for valid fanfic links.
+        # Listen to the allowed channels in the allowed guilds for valid webfic links.
         if (
             (channels_cache := await self.get_guild_autoresponse_channels(message.guild.id))
             and ((message.guild.id, message.channel.id) in channels_cache)
