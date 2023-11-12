@@ -1,23 +1,21 @@
 """
 TODO: Fix upstream dependencies like ao3.py.
-TODO: Double-check necessary permissions.
-TODO: Double-check necessary intents.
 TODO: Evaluate method of input for auth details.
-TODO: Try to set up caching for the embed creation.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import re
 import textwrap
 import tomllib
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, Self, TypeAlias
+from typing import Any, Literal, NamedTuple, ParamSpec, Self, TypeAlias, TypeVar
 
 import aiohttp
 import ao3
@@ -174,6 +172,56 @@ STORY_WEBSITE_REGEX = re.compile(
 )
 
 
+# _HashedSeq and _make_key are modified versions of code found in cpython's functools library.
+# Source: https://github.com/python/cpython/blob/3.11/Lib/functools.py#L448-L477
+# The ttl_task_cache function is a slightly modified version of a cache implementation by mikeshardmind.
+# Source: https://github.com/unified-moderation-network/umn-async-utils/blob/main/umn_async_utils/task_cache.py
+# All credit to the original authors.
+class _HashedSeq(list[object]):
+    __slots__ = ("hashvalue",)
+
+    def __init__(self, tup: Iterable[object], hash: Callable[[object], int] = hash):
+        self[:] = tup
+        self.hashvalue = hash(tup)
+
+    def __hash__(self) -> int:  # type: ignore
+        return self.hashvalue
+
+
+def _make_key(args: tuple[object, ...], kwds: dict[str, object]) -> object | _HashedSeq:
+    kwd_mark = object()
+    key = args
+    if kwds:
+        key = (*key, kwd_mark, *(kwds.items()))
+    elif len(key) == 1 and type(key[0]) in {int, str}:
+        return key[0]
+    return _HashedSeq(key)
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def ttl_task_cache(ttl: float = 120.0) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], Callable[P, asyncio.Task[R]]]:
+    def decorator(coro: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, asyncio.Task[R]]:
+        _internal_cache: dict[object, asyncio.Task[R]] = {}
+
+        @functools.wraps(coro)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Task[R]:
+            key = _make_key(args, kwargs)
+            try:
+                return _internal_cache[key]
+            except KeyError:
+                _internal_cache[key] = task = asyncio.create_task(coro(*args, **kwargs))
+                call_after_ttl = functools.partial(asyncio.get_running_loop().call_later, ttl, _internal_cache.pop, key)
+                task.add_done_callback(call_after_ttl)
+                return task
+
+        return wrapper
+
+    return decorator
+
+
 def create_ao3_work_embed(work: ao3.Work) -> discord.Embed:
     """Create an embed that holds all the relevant metadata for an Archive of Our Own work.
 
@@ -323,19 +371,19 @@ def create_fichub_embed(story: fichub_api.Story) -> discord.Embed:
     return story_embed
 
 
-EMBED_STRATEGIES: dict[Any, Callable[..., discord.Embed]] = {
-    atlas_api.Story: create_atlas_ffn_embed,
-    fichub_api.AO3Story: create_fichub_embed,
-    fichub_api.FFNStory: create_fichub_embed,
-    fichub_api.OtherStory: create_fichub_embed,
-    ao3.Work: create_ao3_work_embed,
-    ao3.Series: create_ao3_series_embed,
-}
-
-
 def ff_embed_factory(story_data: Any | None) -> discord.Embed | None:
-    if story_data is not None and (strategy := EMBED_STRATEGIES.get(type(story_data))):
-        return strategy(story_data)
+    if story_data is None:
+        return None
+
+    if isinstance(story_data, atlas_api.Story):
+        return create_atlas_ffn_embed(story_data)
+    if isinstance(story_data, fichub_api.Story):
+        return create_fichub_embed(story_data)
+    if isinstance(story_data, ao3.Work):
+        return create_ao3_work_embed(story_data)
+    if isinstance(story_data, ao3.Series):
+        return create_ao3_series_embed(story_data)
+
     return None
 
 
@@ -822,6 +870,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
     async def drop_autoresponse_channels(self, locations: Sequence[AutoresponseLocation]) -> list[AutoresponseLocation]:
         return _drop(self.db_connection, locations)
 
+    @ttl_task_cache()
     async def search_ao3(self, name_or_url: str) -> ao3.Work | ao3.Series | fichub_api.Story | None:
         """More generically search AO3 for works based on a partial title or full url."""
 
@@ -854,6 +903,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
 
         return story_data
 
+    @ttl_task_cache()
     async def search_ffn(self, name_or_url: str) -> atlas_api.Story | fichub_api.Story | None:
         """More generically search FFN for works based on a partial title or full url."""
 
@@ -875,6 +925,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
 
         return story_data
 
+    @ttl_task_cache()
     async def search_other(self, url: str) -> fichub_api.Story | None:
         """More generically search for the metadata of other works based on a full url."""
 
@@ -884,7 +935,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
         for match_obj in re.finditer(STORY_WEBSITE_REGEX, text):
             # Attempt to get the story data from whatever method.
             if match_obj.lastgroup == "FFN":
-                story_data = await self.atlas_client.get_story_metadata(int(match_obj.group("ffn_id")))
+                story_data = await self.search_ffn(match_obj.group(0))
             elif match_obj.lastgroup == "AO3":
                 story_data = await self.search_ao3(match_obj.group(0))
             elif match_obj.lastgroup is not None:
