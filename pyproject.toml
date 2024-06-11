@@ -5,15 +5,13 @@ description = "A Discord bot for creating informational embeds about webfiction 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "Sachaa-Thanasius", email = "111999343+Sachaa-Thanasius@users.noreply.github.com" }]
+authors = [
+    { name = "Sachaa-Thanasius", email = "111999343+Sachaa-Thanasius@users.noreply.github.com" },
+]
 
 [project.urls]
-"Homepage" = "https://github.com/Sachaa-Thanasius/discord-webfic-searcher"
+Homepage = "https://github.com/Sachaa-Thanasius/discord-webfic-searcher"
 "Bug Tracker" = "https://github.com/Sachaa-Thanasius/discord-webfic-searcher/issues"
-
-[tool.black]
-line-length = 120
-target-version = ["py311"]
 
 [tool.ruff]
 # Credit to @mikeshardmind for most of this setup.
@@ -64,15 +62,25 @@ ignore = [
     "ANN204",  # Special method return types are implicit.
     "ANN401",  # Need Any for args and kwargs.
     "PLR0913", # Number of parameters in a function definition doesn't matter.
+    "A002",    # Shadowing some built-in names.
     "NPY",     # Numpy isn't relevant to this project.
     "PD",      # Pandas isn't relevant to this project.
+    # recommended by ruff when using ruff format
+    "COM812",
+    "COM819",
+    "E501",
+    "ISC001",
+    "Q003",
 ]
 unfixable = [
     "ERA", # I don't want anything erroneously detected deleted by this.
 ]
 
 [tool.ruff.per-file-ignores]
-"__init__.py" = ["F403", "PLC0414"] # Importing internal modules usually throws these.
+"__init__.py" = [
+    "F403",
+    "PLC0414",
+] # Importing internal modules usually throws these.
 
 [tool.ruff.isort]
 lines-after-imports = 2

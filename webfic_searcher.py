@@ -13,7 +13,7 @@ import os
 import re
 import textwrap
 import tomllib
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, ParamSpec, Self, TypeAlias, TypeVar
 
@@ -172,15 +172,21 @@ STORY_WEBSITE_REGEX = re.compile(
 )
 
 
-# _HashedSeq and _make_key are modified versions of code found in cpython's functools library.
-# Source: https://github.com/python/cpython/blob/3.11/Lib/functools.py#L448-L477
-# The ttl_task_cache function is a slightly modified version of a cache implementation by mikeshardmind.
-# Source: https://github.com/unified-moderation-network/umn-async-utils/blob/main/umn_async_utils/task_cache.py
-# All credit to the original authors.
+"""
+_HashedSeq and _make_key are modified versions of code found in CPython's functools library.
+Source: https://github.com/python/cpython/blob/3.11/Lib/functools.py#L448-L477
+
+The ttl_task_cache function is a slightly modified version of code by mikeshardmind.
+Source: https://github.com/unified-moderation-network/umn-async-utils/blob/main/umn_async_utils/task_cache.py
+
+All credit to the original authors.
+"""
+
+
 class _HashedSeq(list[object]):
     __slots__ = ("hashvalue",)
 
-    def __init__(self, tup: Iterable[object], hash: Callable[[object], int] = hash):
+    def __init__(self, tup: tuple[object, ...], hash: Callable[[object], int] = hash):
         self[:] = tup
         self.hashvalue = hash(tup)
 
@@ -277,7 +283,7 @@ def create_ao3_series_embed(series: ao3.Series) -> discord.Embed:
         updated = series.date_updated.strftime("%B %d, %Y") + (" (Complete)" if series.is_complete else "")
     else:
         updated = "Unknown"
-    author_names = ", ".join(name for creator in series.creators if (name := creator.name))
+    author_names = ", ".join(creator.name for creator in series.creators if creator.name)
     work_links = "\N{BOOKS} **Works:**\n" + "\n".join(f"[{work.title}]({work.url})" for work in series.works_list)
 
     # Add the info in the embed appropriately.
@@ -371,7 +377,7 @@ def create_fichub_embed(story: fichub_api.Story) -> discord.Embed:
     return story_embed
 
 
-def ff_embed_factory(story_data: Any | None) -> discord.Embed | None:
+def ff_embed_factory(story_data: object | None) -> discord.Embed | None:
     if story_data is None:
         return None
 
@@ -796,7 +802,7 @@ class VersionableTree(discord.app_commands.CommandTree):
 
 
 class WebficSearcherBot(discord.AutoShardedClient):
-    def __init__(self, *, session: aiohttp.ClientSession, atlas_auth: aiohttp.BasicAuth) -> None:
+    def __init__(self, *, atlas_auth: aiohttp.BasicAuth) -> None:
         super().__init__(
             intents=discord.Intents(guilds=True, messages=True, message_content=True),
             activity=discord.Game(name="https://github.com/Sachaa-Thanasius/discord-webfic-searcher"),
@@ -804,16 +810,21 @@ class WebficSearcherBot(discord.AutoShardedClient):
         self.tree = VersionableTree(self)
 
         # Initialize the various API clients that are responsible for retrieving fic information.
-        self._session = session
-        self.ao3_client = ao3.Client(session=session)
-        self.atlas_client = atlas_api.Client(auth=atlas_auth, session=session)
-        self.fichub_client = fichub_api.Client(session=session)
+        self._session = aiohttp.ClientSession()
+        self.ao3_client = ao3.Client(session=self._session)
+        self.atlas_client = atlas_api.Client(auth=atlas_auth, session=self._session)
+        self.fichub_client = fichub_api.Client(session=self._session)
 
         # Connect to the database that will store the radio information.
         # -- Need to account for the directories and/or file not existing.
         db_path = platformdir_info.user_data_path / "webfic_searcher_data.db"
         resolved_path_as_str = str(resolve_path_with_links(db_path))
         self.db_connection = apsw.Connection(resolved_path_as_str)
+
+    async def close(self) -> None:
+        if not self._session.closed:
+            await self._session.close()
+        await super().close()
 
     async def on_connect(self: Self) -> None:
         """(Re)set the client's general invite link every time it (re)connects to the Discord Gateway."""
@@ -825,7 +836,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
 
     async def setup_hook(self) -> None:
         # Initialize the database and start the loop.
-        await asyncio.to_thread(_setup_db, self.db_connection)
+        _setup_db(self.db_connection)
 
         # Add the app commands to the tree.
         for cmd in APP_COMMANDS:
@@ -899,7 +910,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
         else:
             search_options = ao3.WorkSearchOptions(any_field=name_or_url)
             search = await self.ao3_client.search_works(search_options)
-            story_data = results[0] if (results := search.results) else None
+            story_data = search.results[0] if search.results else None
 
         return story_data
 
@@ -945,7 +956,7 @@ class WebficSearcherBot(discord.AutoShardedClient):
             yield story_data
 
 
-def load_config() -> dict[str, Any]:
+def load_config() -> dict[str, dict[str, str]]:
     config_path = Path("config.toml")
     with config_path.open(mode="rb") as fp:
         return tomllib.load(fp)
@@ -957,10 +968,7 @@ def main() -> None:
     atlas_auth = aiohttp.BasicAuth(config["atlas"]["login"], config["atlas"]["password"])
 
     async def bot_runner() -> None:
-        async with aiohttp.ClientSession() as session, WebficSearcherBot(
-            session=session,
-            atlas_auth=atlas_auth,
-        ) as client:
+        async with WebficSearcherBot(atlas_auth=atlas_auth) as client:
             await client.start(token, reconnect=True)
 
     loop = uvloop.new_event_loop if (uvloop is not None) else None  # type: ignore
